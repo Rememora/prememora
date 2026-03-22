@@ -1,0 +1,36 @@
+[project]
+name = "prememora"
+version = "0.1.0"
+description = "Event ingestion and prediction engine using OpenViking + MiroFish + Graphiti"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    # Graphiti (replaces Zep Cloud)
+    "graphiti-core>=0.5",
+    "neo4j>=5.0",
+
+    # OpenViking
+    "openviking>=0.2",
+
+    # Polymarket
+    "py-clob-client>=0.1",
+
+    # LLM
+    "openai>=1.0",
+    "anthropic>=0.40",
+
+    # Utils
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
