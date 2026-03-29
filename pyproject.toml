@@ -30,6 +30,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+reddit = [
+    "praw>=7.7",
+]
 
 [build-system]
 requires = ["hatchling"]
