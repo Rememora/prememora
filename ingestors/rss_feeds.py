@@ -35,12 +35,12 @@ FeedConfig = Dict[str, str]  # keys: name, url, category
 DEFAULT_FEEDS: List[FeedConfig] = [
     {
         "name": "AP News — Top News",
-        "url": "https://rss.ap.org/rss/apf-topnews",
+        "url": "https://news.google.com/rss/search?q=when:24h+allinurl:apnews.com&ceid=US:en&hl=en-US&gl=US",
         "category": "general",
     },
     {
         "name": "Reuters — World",
-        "url": "https://www.reutersagency.com/feed/?best-topics=political-general&post_type=best",
+        "url": "https://news.google.com/rss/search?q=when:24h+allinurl:reuters.com&ceid=US:en&hl=en-US&gl=US",
         "category": "general",
     },
     {
@@ -60,7 +60,7 @@ DEFAULT_FEEDS: List[FeedConfig] = [
     },
     {
         "name": "White House",
-        "url": "https://www.whitehouse.gov/feed/",
+        "url": "https://www.whitehouse.gov/news/feed/",
         "category": "government",
     },
     {
