@@ -240,7 +240,7 @@ class TestOrchestratorHandleEvent:
     def orchestrator(self):
         orch = IngestionOrchestrator(graph_id="test_graph")
         orch._client = MagicMock()
-        orch._client.graph.episode.add = MagicMock()
+        orch._client.graph.add = MagicMock()
         return orch
 
     @pytest.mark.asyncio
@@ -252,8 +252,8 @@ class TestOrchestratorHandleEvent:
             "content": "Some content",
         }
         await orchestrator._handle_event(event)
-        orchestrator._client.graph.episode.add.assert_called_once()
-        call_kwargs = orchestrator._client.graph.episode.add.call_args
+        orchestrator._client.graph.add.assert_called_once()
+        call_kwargs = orchestrator._client.graph.add.call_args
         assert call_kwargs[1]["graph_id"] == "test_graph"
         assert "Test Article" in call_kwargs[1]["data"]
         assert orchestrator._ingested_count == 1
@@ -267,7 +267,7 @@ class TestOrchestratorHandleEvent:
         }
         await orchestrator._handle_event(event)
         await orchestrator._handle_event(event)
-        assert orchestrator._client.graph.episode.add.call_count == 1
+        assert orchestrator._client.graph.add.call_count == 1
         assert orchestrator._ingested_count == 1
         assert orchestrator._deduped_count == 1
 
@@ -277,12 +277,12 @@ class TestOrchestratorHandleEvent:
         e2 = {"source": "crypto_news", "url": "https://example.com/b", "title": "B"}
         await orchestrator._handle_event(e1)
         await orchestrator._handle_event(e2)
-        assert orchestrator._client.graph.episode.add.call_count == 2
+        assert orchestrator._client.graph.add.call_count == 2
         assert orchestrator._ingested_count == 2
 
     @pytest.mark.asyncio
     async def test_graphiti_error_counted(self, orchestrator):
-        orchestrator._client.graph.episode.add.side_effect = RuntimeError("Neo4j down")
+        orchestrator._client.graph.add.side_effect = RuntimeError("Neo4j down")
         event = {"source": "rss", "title": "Test", "url": "https://example.com/test"}
         await orchestrator._handle_event(event)
         assert orchestrator._error_count == 1

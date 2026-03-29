@@ -274,7 +274,7 @@ class IngestionOrchestrator:
         ts = event.get("timestamp", datetime.now(timezone.utc).isoformat())
 
         try:
-            self._client.graph.episode.add(
+            self._client.graph.add(
                 graph_id=self.graph_id,
                 data=f"[{ts}] [{source}] {text}",
             )
