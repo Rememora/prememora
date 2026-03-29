@@ -36,6 +36,9 @@ Thumbs.db
 *.log
 log.md
 
+# Data
+data/*.db
+
 # MiroFish runtime data
 vendor/mirofish/backend/uploads/
 vendor/mirofish/.env

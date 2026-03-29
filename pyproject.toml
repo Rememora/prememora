@@ -30,6 +30,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+backtesting = [
+    "aiohttp>=3.9",
+]
 
 [build-system]
 requires = ["hatchling"]
