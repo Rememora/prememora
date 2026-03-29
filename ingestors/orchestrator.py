@@ -274,7 +274,11 @@ class IngestionOrchestrator:
         ts = event.get("timestamp", datetime.now(timezone.utc).isoformat())
 
         try:
-            self._client.graph.add(
+            # Run in a thread because the adapter uses its own event loop
+            # internally (run_coroutine_threadsafe) and Graphiti's Neo4j
+            # driver binds to the loop it was created on.
+            await asyncio.to_thread(
+                self._client.graph.add,
                 graph_id=self.graph_id,
                 data=f"[{ts}] [{source}] {text}",
             )
