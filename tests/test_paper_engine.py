@@ -273,6 +273,71 @@ class TestPortfolio:
         assert positions[0].confidence == 0.60
 
 
+class TestEntryConfidenceAndDeadline:
+    def test_entry_confidence_stored(self, engine):
+        pos = engine.open_position("mkt_1", "YES", 10, 0.50, confidence=0.80)
+        assert pos.entry_confidence == 0.80
+
+    def test_entry_confidence_preserved_after_update(self, engine):
+        engine.open_position("mkt_1", "YES", 10, 0.50, confidence=0.80)
+        engine.update_confidence("mkt_1", 0.60)
+        positions = engine.get_open_positions()
+        assert positions[0].confidence == 0.60
+        assert positions[0].entry_confidence == 0.80  # unchanged
+
+    def test_market_deadline_stored(self, engine):
+        pos = engine.open_position(
+            "mkt_1", "YES", 10, 0.50,
+            confidence=0.80,
+            market_deadline="2026-05-01T00:00:00+00:00",
+        )
+        assert pos.market_deadline == "2026-05-01T00:00:00+00:00"
+
+    def test_market_deadline_none_by_default(self, engine):
+        pos = engine.open_position("mkt_1", "YES", 10, 0.50)
+        assert pos.market_deadline is None
+
+    def test_entry_confidence_none_when_no_confidence(self, engine):
+        pos = engine.open_position("mkt_1", "YES", 10, 0.50)
+        assert pos.entry_confidence is None
+
+    def test_schema_migration(self, tmp_path):
+        """New columns are added gracefully to an existing DB without them."""
+        import sqlite3
+
+        db = tmp_path / "old.db"
+        # Create a DB with the old schema (no entry_confidence, no market_deadline)
+        conn = sqlite3.connect(str(db))
+        conn.executescript("""
+            CREATE TABLE portfolio (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO portfolio (key, value) VALUES ('cash', '1000.0');
+            CREATE TABLE positions (
+                id TEXT PRIMARY KEY, market_id TEXT, side TEXT,
+                shares REAL, entry_price REAL, current_price REAL,
+                status TEXT DEFAULT 'OPEN', confidence REAL,
+                entry_reason TEXT DEFAULT '', exit_reason TEXT DEFAULT '',
+                entry_time TEXT, exit_time TEXT, pnl REAL DEFAULT 0
+            );
+            CREATE TABLE trades (
+                id TEXT PRIMARY KEY, position_id TEXT, market_id TEXT,
+                side TEXT, shares REAL, price REAL, fee REAL,
+                trade_type TEXT, reason TEXT DEFAULT '', timestamp TEXT
+            );
+        """)
+        conn.close()
+
+        # Opening the engine should migrate (add columns) without error
+        eng = PaperTradingEngine(db_path=db)
+        pos = eng.open_position(
+            "mkt_1", "YES", 10, 0.50,
+            confidence=0.75,
+            market_deadline="2026-06-01T00:00:00+00:00",
+        )
+        assert pos.entry_confidence == 0.75
+        assert pos.market_deadline == "2026-06-01T00:00:00+00:00"
+        eng.close()
+
+
 class TestPersistence:
     def test_survives_restart(self, tmp_path):
         db = tmp_path / "persist.db"

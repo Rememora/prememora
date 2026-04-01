@@ -55,6 +55,7 @@ class PipelineConfig:
     market_category: str = ""             # filter by category (empty = all)
     interview_timeout: int = 120          # seconds
     signal_log_path: Path = DEFAULT_SIGNAL_LOG
+    exit_config: Any = None               # ExitConfig for exit monitoring (None = disabled)
 
     def __post_init__(self):
         self.mirofish_url = self.mirofish_url or os.getenv("MIROFISH_BACKEND", "http://localhost:5001")
@@ -74,6 +75,7 @@ class ActiveMarket:
     current_price: float   # YES token price (0-1)
     volume: float
     category: str
+    end_date: str = ""     # ISO date when market closes (from Gamma endDateIso)
 
 
 async def fetch_active_markets(
@@ -123,6 +125,7 @@ async def fetch_active_markets(
             current_price=yes_price or 0.5,
             volume=float(m.get("volume", 0)),
             category=m.get("groupSlug", m.get("category", "")),
+            end_date=m.get("endDateIso", ""),
         ))
 
     logger.info("Fetched %d active markets", len(markets))
@@ -266,10 +269,21 @@ class PipelineTrigger:
         self._edge_config = edge_config
         self._cycle_count = 0
         self._context_builder = None
+        self._exit_monitor = None
 
         if self.config.graph_id:
             from pipeline.context import ContextBuilder
             self._context_builder = ContextBuilder(graph_id=self.config.graph_id)
+
+        if self.config.exit_config and self.paper_engine:
+            from trading.exit_monitor import ExitMonitor
+            self._exit_monitor = ExitMonitor(
+                config=self.config.exit_config,
+                paper_engine=self.paper_engine,
+                mirofish_url=self.config.mirofish_url,
+                simulation_id=self.config.simulation_id,
+                graph_id=self.config.graph_id,
+            )
 
     def _get_edge_calculator(self):
         from trading.edge_calculator import EdgeCalculator, EdgeConfig
@@ -320,6 +334,30 @@ class PipelineTrigger:
             "Pipeline cycle #%d complete: %d markets evaluated, %d actionable signals",
             self._cycle_count, len(signals_log), len(actionable),
         )
+
+        # Run exit monitoring on existing positions
+        if self._exit_monitor:
+            try:
+                exit_signals = await self._exit_monitor.run_once()
+                for es in exit_signals:
+                    exit_record = {
+                        "cycle_time": cycle_time,
+                        "market_id": es.market_id,
+                        "action": "EXIT",
+                        "reason": es.reason,
+                        "trigger_type": es.trigger_type,
+                        "position_id": es.position_id,
+                        "old_confidence": es.old_confidence,
+                        "new_confidence": es.new_confidence,
+                        "market_price": es.market_price,
+                        "executed": True,
+                    }
+                    signals_log.append(exit_record)
+                    log_signal(self.config.signal_log_path, exit_record)
+                if exit_signals:
+                    logger.info("Exit monitor triggered %d exits", len(exit_signals))
+            except Exception:
+                logger.exception("Exit monitor failed")
 
         return signals_log
 
@@ -436,6 +474,7 @@ class PipelineTrigger:
                     price=signal.price,
                     reason=signal.reason,
                     confidence=our_prob,
+                    market_deadline=market.end_date or None,
                 )
                 record["executed"] = True
                 record["position_id"] = pos.id
