@@ -299,25 +299,53 @@ async def check_resolved_markets(
     ) as session:
         for market_id in market_ids:
             try:
+                # Try looking up by condition_id in the markets list
                 async with session.get(
-                    f"{GAMMA_API_BASE}/markets/{market_id}"
+                    f"{GAMMA_API_BASE}/markets",
+                    params={"condition_id": market_id, "limit": 1},
                 ) as resp:
                     if resp.status != 200:
                         continue
                     data = await resp.json()
+                    if not data:
+                        continue
+                    market = data[0] if isinstance(data, list) else data
 
-                    resolution = data.get("resolution")
-                    resolved_at = data.get("resolvedAt") or data.get("resolved_at")
+                    resolved_by = market.get("resolvedBy") or ""
+                    if not resolved_by:
+                        continue
 
-                    if resolution and resolved_at:
-                        # Gamma API returns resolution as the winning outcome
-                        outcome = resolution.upper()
-                        if outcome in ("YES", "NO"):
-                            resolved[market_id] = outcome
-                        elif outcome in ("1", "TRUE"):
-                            resolved[market_id] = "YES"
-                        elif outcome in ("0", "FALSE"):
-                            resolved[market_id] = "NO"
+                    outcome_prices = market.get("outcomePrices") or ""
+                    outcomes_raw = market.get("outcomes") or ""
+
+                    try:
+                        if isinstance(outcome_prices, str):
+                            prices = json.loads(outcome_prices)
+                        else:
+                            prices = outcome_prices
+                        if isinstance(outcomes_raw, str):
+                            labels = json.loads(outcomes_raw)
+                        else:
+                            labels = outcomes_raw
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    if len(prices) < 2 or len(labels) < 2:
+                        continue
+
+                    winner_idx = None
+                    for i, p in enumerate(prices):
+                        if str(p) == "1":
+                            winner_idx = i
+                            break
+                    if winner_idx is None:
+                        continue
+
+                    winner_label = labels[winner_idx].strip().upper()
+                    if winner_label in ("YES", "Y"):
+                        resolved[market_id] = "YES"
+                    elif winner_label in ("NO", "N"):
+                        resolved[market_id] = "NO"
             except Exception as e:
                 logger.debug("Failed to check market %s: %s", market_id[:16], e)
 
