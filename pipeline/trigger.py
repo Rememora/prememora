@@ -49,6 +49,7 @@ class PipelineConfig:
     """Configuration for the pipeline trigger."""
     mirofish_url: str = ""
     simulation_id: str = ""
+    graph_id: str = ""                    # Graphiti graph for context enrichment
     interval_seconds: int = 1800          # 30 minutes
     max_markets: int = 10                 # top N markets by volume
     market_category: str = ""             # filter by category (empty = all)
@@ -58,6 +59,7 @@ class PipelineConfig:
     def __post_init__(self):
         self.mirofish_url = self.mirofish_url or os.getenv("MIROFISH_BACKEND", "http://localhost:5001")
         self.simulation_id = self.simulation_id or os.getenv("MIROFISH_SIMULATION_ID", "")
+        self.graph_id = self.graph_id or os.getenv("PREMEMORA_GRAPH_ID", "")
 
 
 # ── Market fetching ───────────────────────────────────────────────────────────
@@ -263,6 +265,11 @@ class PipelineTrigger:
         self.paper_engine = paper_engine
         self._edge_config = edge_config
         self._cycle_count = 0
+        self._context_builder = None
+
+        if self.config.graph_id:
+            from pipeline.context import ContextBuilder
+            self._context_builder = ContextBuilder(graph_id=self.config.graph_id)
 
     def _get_edge_calculator(self):
         from trading.edge_calculator import EdgeCalculator, EdgeConfig
@@ -341,11 +348,28 @@ class PipelineTrigger:
             logger.debug("Skipping %s: no simulation_id", market.id[:16])
             return record
 
-        question = (
-            f"What probability (0-100%) do you assign to the following: "
-            f"{market.question} "
-            f"Please give a specific number."
-        )
+        # Build context from knowledge graph (if graph_id configured)
+        context = None
+        if self.config.graph_id and self._context_builder:
+            try:
+                context = await asyncio.to_thread(
+                    self._context_builder.build_context, market.question
+                )
+                record["context_facts"] = len(context.facts) if context else 0
+                record["search_terms"] = context.search_terms if context else []
+            except Exception as e:
+                logger.warning("Context building failed for %s: %s", market.id[:16], e)
+
+        # Build interview prompt (enriched with graph context if available)
+        if context and context.facts:
+            from pipeline.context import build_enriched_prompt
+            question = build_enriched_prompt(market.question, context)
+        else:
+            question = (
+                f"What probability (0-100%) do you assign to the following: "
+                f"{market.question} "
+                f"Please give a specific number."
+            )
 
         responses = await interview_agents(
             session,
@@ -383,11 +407,14 @@ class PipelineTrigger:
         record["our_probability"] = our_prob
 
         # Edge calculation
+        context_note = ""
+        if context and context.facts:
+            context_note = f" with {len(context.facts)} graph facts"
         estimate = ProbabilityEstimate(
             market_id=market.id,
             probability=our_prob,
             source="mirofish",
-            reasoning=f"Aggregated from {len(probs)} agent estimates",
+            reasoning=f"Aggregated from {len(probs)} agent estimates{context_note}",
         )
         signal = calc.evaluate(estimate, market.current_price)
 
@@ -457,11 +484,13 @@ async def main():
     parser.add_argument("--interval", type=int, default=1800, help="Seconds between cycles")
     parser.add_argument("--max-markets", type=int, default=10)
     parser.add_argument("--simulation-id", default="")
+    parser.add_argument("--graph-id", default="", help="Graphiti graph ID for context enrichment")
     parser.add_argument("--dry-run", action="store_true", help="Don't execute trades")
     args = parser.parse_args()
 
     config = PipelineConfig(
         simulation_id=args.simulation_id,
+        graph_id=args.graph_id,
         interval_seconds=args.interval,
         max_markets=args.max_markets,
     )
