@@ -76,6 +76,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design.
 | Document | Purpose |
 |----------|---------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design, component relationships, data flow |
+| [docs/architecture-insights.md](docs/architecture-insights.md) | Design decisions and the *why* behind them |
 | [AGENTS.md](AGENTS.md) | Agent/LLM coding assistant instructions |
 | [docs/decisions/](docs/decisions/) | Architecture Decision Records |
 | [docs/minimax-quirks.md](docs/minimax-quirks.md) | MiniMax M2.5 API compatibility notes |
@@ -88,9 +89,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design.
 - [x] Graph read path (search, statistics, entities)
 - [x] Report agent (multi-section reports + chat)
 - [x] OASIS simulation (multi-agent Twitter simulation)
-- [ ] OpenViking event ingestion
-- [ ] Real-world data pipeline
-- [ ] Polymarket trading integration
+- [x] Event ingestion — 6 connectors (Polymarket WS, crypto news, RSS, whale alerts, Reddit, FRED)
+- [x] Unified ingestion orchestrator — all sources → Graphiti with dedup
+- [x] Paper trading engine — SQLite, position lifecycle, fee calc, P&L
+- [x] Edge calculator — Kelly sizing, risk limits, drawdown protection
+- [x] Pipeline trigger — MiroFish interviews → edge calc → paper trading
+- [x] Graph context enrichment — relevant facts from knowledge graph fed to agent interviews
+- [x] Strategy review — Brier score, calibration, source attribution, recommendations
+- [ ] Live end-to-end test with real Polymarket markets
 
 ## License
 
