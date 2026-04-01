@@ -69,6 +69,8 @@ class Position:
     entry_time: str
     exit_time: str | None
     pnl: float
+    entry_confidence: float | None = None
+    market_deadline: str | None = None
 
     @property
     def cost_basis(self) -> float:
@@ -181,6 +183,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             ON trades(market_id);
         """
     )
+    # Migrate: add entry_confidence and market_deadline columns if missing
+    for col, col_type in [("entry_confidence", "REAL"), ("market_deadline", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # Initialize cash if not set
     existing = conn.execute("SELECT value FROM portfolio WHERE key='cash'").fetchone()
     if existing is None:
@@ -238,6 +247,7 @@ class PaperTradingEngine:
         price: float,
         reason: str = "",
         confidence: float | None = None,
+        market_deadline: str | None = None,
     ) -> Position:
         """Open a new position. Deducts cost + fee from cash."""
         side = side.upper()
@@ -277,9 +287,11 @@ class PaperTradingEngine:
         self._conn.execute(
             """INSERT INTO positions
                (id, market_id, side, shares, entry_price, current_price,
-                status, confidence, entry_reason, entry_time)
-               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)""",
-            (pos_id, market_id, side, shares, price, price, confidence, reason, now),
+                status, confidence, entry_reason, entry_time,
+                entry_confidence, market_deadline)
+               VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?)""",
+            (pos_id, market_id, side, shares, price, price, confidence, reason, now,
+             confidence, market_deadline),
         )
         self._conn.execute(
             """INSERT INTO trades

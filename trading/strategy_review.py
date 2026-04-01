@@ -57,6 +57,9 @@ class SignalRecord:
     context_facts: int
     executed: bool
     position_id: str
+    trigger_type: str = ""         # populated for EXIT signals
+    old_confidence: float | None = None
+    new_confidence: float | None = None
 
 
 @dataclass
@@ -81,6 +84,14 @@ class SourceStats:
 
 
 @dataclass
+class ExitStats:
+    """Exit statistics by trigger type."""
+    trigger_type: str
+    count: int
+    total_pnl: float
+
+
+@dataclass
 class StrategyReport:
     """Complete strategy review report."""
     # Overview
@@ -101,8 +112,13 @@ class StrategyReport:
     # Source attribution
     source_stats: list[SourceStats]
 
+    # Exit statistics
+    exit_stats: list[ExitStats] = field(default_factory=list)
+    early_exit_pnl: float = 0.0
+    held_to_resolution_pnl: float = 0.0
+
     # Recommendations
-    recommendations: list[str]
+    recommendations: list[str] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
@@ -126,9 +142,20 @@ class StrategyReport:
         lines.append(f"Total P&L:         ${self.total_pnl:+.2f}")
         lines.append("")
 
+        # Exit statistics
+        if self.exit_stats:
+            lines.append("Exit statistics:")
+            for es in self.exit_stats:
+                lines.append(
+                    f"  {es.trigger_type:24s} count={es.count:<4d} pnl=${es.total_pnl:>+8.2f}"
+                )
+            lines.append(f"  Early exit P&L:          ${self.early_exit_pnl:>+8.2f}")
+            lines.append(f"  Held-to-resolution P&L:  ${self.held_to_resolution_pnl:>+8.2f}")
+            lines.append("")
+
         # Calibration
         if self.calibration:
-            lines.append("Calibration (predicted → actual):")
+            lines.append("Calibration (predicted -> actual):")
             for b in self.calibration:
                 bar = "█" * int(b.actual_win_rate * 20) + "░" * (20 - int(b.actual_win_rate * 20))
                 lines.append(
@@ -153,7 +180,7 @@ class StrategyReport:
         if self.recommendations:
             lines.append("Recommendations:")
             for r in self.recommendations:
-                lines.append(f"  → {r}")
+                lines.append(f"  -> {r}")
         else:
             lines.append("No recommendations (need more data)")
 
@@ -187,6 +214,9 @@ def read_signal_log(path: Path) -> list[SignalRecord]:
                 context_facts=d.get("context_facts", 0),
                 executed=d.get("executed", False),
                 position_id=d.get("position_id", ""),
+                trigger_type=d.get("trigger_type", ""),
+                old_confidence=d.get("old_confidence"),
+                new_confidence=d.get("new_confidence"),
             ))
         except (json.JSONDecodeError, KeyError) as e:
             logger.debug("Skipping malformed signal log entry: %s", e)
@@ -430,7 +460,7 @@ class StrategyReview:
         prediction_pairs: list[tuple[float, bool]] = []
         signal_by_market: dict[str, SignalRecord] = {}
         for s in signals:
-            if s.our_probability is not None and s.executed:
+            if s.our_probability is not None and s.executed and s.action != "EXIT":
                 signal_by_market[s.market_id] = s
 
         for p in resolved:
@@ -483,6 +513,39 @@ class StrategyReview:
             for src, d in source_data.items()
         ]
 
+        # Exit statistics
+        exit_signals = [s for s in signals if s.action == "EXIT"]
+        exit_by_trigger: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"count": 0, "pnl": 0.0}
+        )
+
+        # Match EXIT signals to closed positions by position_id
+        closed_by_id = {p.id: p for p in closed}
+        early_exit_pnl = 0.0
+        for es in exit_signals:
+            trigger = es.trigger_type or "unknown"
+            exit_by_trigger[trigger]["count"] += 1
+            pos = closed_by_id.get(es.position_id)
+            if pos:
+                exit_by_trigger[trigger]["pnl"] += pos.pnl
+                early_exit_pnl += pos.pnl
+
+        exit_stats_list = [
+            ExitStats(
+                trigger_type=trigger,
+                count=d["count"],
+                total_pnl=d["pnl"],
+            )
+            for trigger, d in exit_by_trigger.items()
+        ]
+
+        # Held-to-resolution P&L: resolved positions that were NOT early-exited
+        early_exit_position_ids = {s.position_id for s in exit_signals}
+        held_to_resolution_pnl = sum(
+            p.pnl for p in resolved
+            if p.id not in early_exit_position_ids
+        )
+
         # Recommendations
         recs = self._generate_recommendations(
             bs, cal, win_rate, source_stats, len(settled), len(prediction_pairs),
@@ -501,6 +564,9 @@ class StrategyReview:
             total_pnl=total_pnl,
             calibration=cal,
             source_stats=source_stats,
+            exit_stats=exit_stats_list,
+            early_exit_pnl=early_exit_pnl,
+            held_to_resolution_pnl=held_to_resolution_pnl,
             recommendations=recs,
         )
 
