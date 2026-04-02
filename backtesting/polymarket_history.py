@@ -227,6 +227,30 @@ def _parse_market(raw: dict[str, Any]) -> Market:
         except (json.JSONDecodeError, TypeError):
             outcomes_raw = [outcomes_raw]
 
+    # Derive resolution from outcomePrices (Gamma API doesn't have a
+    # "resolution" field — resolved markets have outcomePrices like ["1","0"]
+    # and a non-empty resolvedBy address).
+    resolution = raw.get("resolution")
+    resolved_at = raw.get("resolvedAt") or raw.get("resolved_at")
+    resolved_by = raw.get("resolvedBy") or ""
+    closed_time = raw.get("closedTime") or ""
+
+    if not resolution and resolved_by:
+        outcome_prices = raw.get("outcomePrices") or ""
+        try:
+            prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+        except (json.JSONDecodeError, TypeError):
+            prices = []
+
+        if prices and len(prices) >= 2 and len(outcomes_raw) >= 2:
+            for i, p in enumerate(prices):
+                if str(p) == "1":
+                    resolution = outcomes_raw[i].strip() if i < len(outcomes_raw) else None
+                    break
+
+    if not resolved_at and closed_time:
+        resolved_at = closed_time
+
     return Market(
         id=str(raw.get("id", raw.get("conditionId", ""))),
         question=raw.get("question", ""),
@@ -234,8 +258,8 @@ def _parse_market(raw: dict[str, Any]) -> Market:
         category=raw.get("category", "") or "",
         outcomes=json.dumps(outcomes_raw),
         created_at=raw.get("createdAt") or raw.get("created_at") or "",
-        resolved_at=raw.get("resolvedAt") or raw.get("resolved_at"),
-        resolution=raw.get("resolution"),
+        resolved_at=resolved_at,
+        resolution=resolution,
         volume=float(raw.get("volume", 0) or 0),
         clob_token_ids=json.dumps(clob_token_ids),
     )
@@ -261,6 +285,8 @@ async def discover_markets(
             params: dict[str, Any] = {
                 "limit": page_size,
                 "offset": offset,
+                "order": "volume",
+                "ascending": "false",
             }
             if category:
                 params["tag"] = category
