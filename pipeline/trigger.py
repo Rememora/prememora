@@ -56,6 +56,8 @@ class PipelineConfig:
     interview_timeout: int = 120          # seconds
     signal_log_path: Path = DEFAULT_SIGNAL_LOG
     exit_config: Any = None               # ExitConfig for exit monitoring (None = disabled)
+    calibration_gate: bool = False         # enable oracle-based calibration gate
+    gate_max_brier: float = 0.25          # max Brier score to allow trading
 
     def __post_init__(self):
         self.mirofish_url = self.mirofish_url or os.getenv("MIROFISH_BACKEND", "http://localhost:5001")
@@ -270,10 +272,18 @@ class PipelineTrigger:
         self._cycle_count = 0
         self._context_builder = None
         self._exit_monitor = None
+        self._calibration_gate = None
+        self._gate_passed = None  # None = not checked, True/False = last result
 
         if self.config.graph_id:
             from pipeline.context import ContextBuilder
             self._context_builder = ContextBuilder(graph_id=self.config.graph_id)
+
+        if self.config.calibration_gate:
+            from trading.calibration_gate import CalibrationGate, GateConfig
+            self._calibration_gate = CalibrationGate(config=GateConfig(
+                max_brier=self.config.gate_max_brier,
+            ))
 
         if self.config.exit_config and self.paper_engine:
             from trading.exit_monitor import ExitMonitor
@@ -308,6 +318,26 @@ class PipelineTrigger:
         cycle_time = datetime.now(timezone.utc).isoformat()
         logger.info("Pipeline cycle #%d starting", self._cycle_count)
 
+        # Calibration gate check — block trade execution if poorly calibrated
+        execute_trades = True
+        if self._calibration_gate:
+            try:
+                gate_result = await self._calibration_gate.check()
+                self._gate_passed = gate_result.can_trade
+                execute_trades = gate_result.can_trade
+                if not execute_trades:
+                    logger.warning(
+                        "Calibration gate BLOCKED trading: %s", gate_result.reason,
+                    )
+                else:
+                    logger.info(
+                        "Calibration gate passed (brier=%.4f)",
+                        gate_result.brier_score or 0,
+                    )
+            except Exception:
+                logger.exception("Calibration gate check failed — defaulting to no-trade")
+                execute_trades = False
+
         signals_log: list[dict[str, Any]] = []
 
         async with aiohttp.ClientSession() as session:
@@ -325,7 +355,7 @@ class PipelineTrigger:
             calc = self._get_edge_calculator()
 
             for market in markets:
-                record = await self._evaluate_market(session, market, calc, cycle_time)
+                record = await self._evaluate_market(session, market, calc, cycle_time, execute_trades)
                 signals_log.append(record)
                 log_signal(self.config.signal_log_path, record)
 
@@ -367,6 +397,7 @@ class PipelineTrigger:
         market: ActiveMarket,
         calc: Any,
         cycle_time: str,
+        execute: bool = True,
     ) -> dict[str, Any]:
         """Evaluate a single market: interview → parse → edge calc → maybe trade."""
         from trading.edge_calculator import ProbabilityEstimate
@@ -464,8 +495,8 @@ class PipelineTrigger:
         record["price"] = signal.price
         record["reason"] = signal.reason
 
-        # Execute if actionable
-        if signal.action != "SKIP" and self.paper_engine:
+        # Execute if actionable and gate allows it
+        if signal.action != "SKIP" and self.paper_engine and execute:
             try:
                 pos = self.paper_engine.open_position(
                     market_id=signal.market_id,
@@ -486,6 +517,9 @@ class PipelineTrigger:
                 logger.warning("Failed to execute signal on %s: %s", market.id[:16], e)
         else:
             record["executed"] = False
+            if signal.action != "SKIP" and not execute:
+                record["gate_blocked"] = True
+                logger.info("Signal blocked by calibration gate: %s %s", signal.action, market.id[:16])
 
         return record
 
