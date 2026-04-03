@@ -497,8 +497,14 @@ class HindsightOracle:
         eval_price = self._get_eval_price(prices, cfg.eval_hours_before_close)
 
         if eval_price is None:
-            # Fall back to a synthetic price based on outcome
-            eval_price = 0.7 if outcome == "YES" else 0.3
+            # CLOB doesn't serve price history for resolved markets, so
+            # we generate a synthetic eval price. This means backtest P&L
+            # is illustrative, not a true replay. Use a hash-based price
+            # that varies per market but is biased toward the correct side.
+            import hashlib
+            h = int(hashlib.sha256(market.question.encode()).hexdigest()[:6], 16)
+            noise = (h % 100) / 100.0 * 0.30  # 0 to 0.30
+            eval_price = (0.50 + noise) if outcome == "YES" else (0.20 + noise)
 
         # ── Graph context (optional) ─────────────────────────────────
         context_facts: list[str] = []

@@ -128,7 +128,8 @@ class TestPipelineTrigger:
             assert signals == []
 
     @pytest.mark.asyncio
-    async def test_run_once_no_simulation_id(self, config, tmp_path):
+    async def test_run_once_no_simulation_id_uses_llm_fallback(self, config, tmp_path):
+        """Without simulation_id, pipeline falls back to LLM direct estimation."""
         config.simulation_id = ""
         trigger = PipelineTrigger(config=config)
 
@@ -136,12 +137,14 @@ class TestPipelineTrigger:
             id="0xabc", question="Will X happen?", token_ids=["t1"],
             current_price=0.65, volume=100000, category="test",
         )
-        with patch("pipeline.trigger.fetch_active_markets", new_callable=AsyncMock) as mock_fetch:
+        with patch("pipeline.trigger.fetch_active_markets", new_callable=AsyncMock) as mock_fetch, \
+             patch("backtesting.hindsight.llm_estimate_probability", new_callable=AsyncMock) as mock_llm:
             mock_fetch.return_value = [market]
+            mock_llm.return_value = 0.70  # synthetic LLM estimate
             signals = await trigger.run_once()
             assert len(signals) == 1
-            assert signals[0]["action"] == "SKIP"
-            assert "no simulation_id" in signals[0]["reason"]
+            assert signals[0].get("our_probability") == 0.70
+            assert signals[0].get("source") == "llm_direct"
 
     @pytest.mark.asyncio
     async def test_run_once_with_responses(self, config, tmp_path):
