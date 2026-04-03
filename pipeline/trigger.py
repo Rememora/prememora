@@ -423,85 +423,66 @@ class PipelineTrigger:
             except Exception as e:
                 logger.warning("Context building failed for %s: %s", market.id[:16], e)
 
-        # Get probability estimate — MiroFish interview or LLM fallback
-        our_prob = None
-        context_facts = context.facts if context else []
+        # MiroFish interview — required, no fallback
+        if not self.config.simulation_id:
+            record["reason"] = "no simulation_id configured"
+            logger.debug("Skipping %s: no simulation_id", market.id[:16])
+            return record
 
-        if self.config.simulation_id:
-            # Build interview prompt (enriched with graph context if available)
-            if context and context.facts:
-                from pipeline.context import build_enriched_prompt
-                question = build_enriched_prompt(market.question, context)
-            else:
-                question = (
-                    f"What probability (0-100%) do you assign to the following: "
-                    f"{market.question} "
-                    f"Please give a specific number."
-                )
-
-            responses = await interview_agents(
-                session,
-                self.config.mirofish_url,
-                self.config.simulation_id,
-                question,
-                timeout=self.config.interview_timeout,
+        # Build interview prompt (enriched with graph context if available)
+        if context and context.facts:
+            from pipeline.context import build_enriched_prompt
+            question = build_enriched_prompt(market.question, context)
+        else:
+            question = (
+                f"What probability (0-100%) do you assign to the following: "
+                f"{market.question} "
+                f"Please give a specific number."
             )
 
-            if not responses:
-                record["reason"] = "no agent responses"
-                return record
+        responses = await interview_agents(
+            session,
+            self.config.mirofish_url,
+            self.config.simulation_id,
+            question,
+            timeout=self.config.interview_timeout,
+        )
 
-            probs = []
-            for resp in responses:
-                text = resp.get("response", "")
-                p = parse_probability(text)
-                if p is not None and 0 <= p <= 1:
-                    probs.append(p)
+        if not responses:
+            record["reason"] = "no agent responses"
+            return record
 
-            record["agent_responses"] = len(responses)
-            record["parsed_probabilities"] = probs
+        probs = []
+        for resp in responses:
+            text = resp.get("response", "")
+            p = parse_probability(text)
+            if p is not None and 0 <= p <= 1:
+                probs.append(p)
 
-            if not probs:
-                record["reason"] = f"could not parse probability from {len(responses)} responses"
-                return record
+        record["agent_responses"] = len(responses)
+        record["parsed_probabilities"] = probs
 
-            our_prob = aggregate_probabilities(probs)
-            record["source"] = "mirofish"
-        else:
-            # LLM fallback — single call to estimate probability
-            try:
-                from backtesting.hindsight import llm_estimate_probability
-                our_prob = await llm_estimate_probability(
-                    question=market.question,
-                    context_facts=context_facts,
-                    market_price=market.current_price,
-                )
-                record["source"] = "llm_direct"
-            except Exception as e:
-                record["reason"] = f"LLM fallback failed: {e}"
-                return record
+        if not probs:
+            record["reason"] = f"could not parse probability from {len(responses)} responses"
+            return record
 
+        our_prob = aggregate_probabilities(probs)
         if our_prob is None:
-            record["reason"] = "probability estimation failed"
+            record["reason"] = "aggregation failed"
             return record
 
         record["our_probability"] = our_prob
+        record["source"] = "mirofish"
 
         # Edge calculation
         context_note = ""
         if context and context.facts:
             context_note = f" with {len(context.facts)} graph facts"
-        source = record.get("source", "mirofish")
-        if source == "mirofish":
-            reasoning = f"Aggregated from {len(record.get('parsed_probabilities', []))} agent estimates{context_note}"
-        else:
-            reasoning = f"LLM direct estimate{context_note}"
-
         estimate = ProbabilityEstimate(
             market_id=market.id,
             probability=our_prob,
-            source=source,
-            reasoning=reasoning,
+            source="mirofish",
+            reasoning=f"Aggregated from {len(probs)} agent estimates{context_note}",
         )
         signal = calc.evaluate(estimate, market.current_price)
 
