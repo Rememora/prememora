@@ -72,6 +72,8 @@ async def run_soak(
     # Clean previous soak data only if explicitly requested
     engine = PaperTradingEngine(db_path=SOAK_DB_PATH, initial_cash=1000.0)
 
+    from pipeline.trigger import DEFAULT_RELEVANCE_KEYWORDS
+
     config = PipelineConfig(
         simulation_id=simulation_id,
         graph_id=graph_id,
@@ -79,6 +81,7 @@ async def run_soak(
         max_markets=max_markets,
         signal_log_path=SOAK_SIGNAL_LOG,
         calibration_gate=gate_enabled,
+        relevance_keywords=DEFAULT_RELEVANCE_KEYWORDS,
     )
 
     trigger = PipelineTrigger(config=config, paper_engine=engine)
@@ -238,7 +241,7 @@ async def main():
     p_start = sub.add_parser("start", help="Start the soak test")
     p_start.add_argument("--hours", type=float, default=72)
     p_start.add_argument("--interval", type=int, default=1800)
-    p_start.add_argument("--max-markets", type=int, default=10)
+    p_start.add_argument("--max-markets", type=int, default=20)
     p_start.add_argument("--simulation-id", default="")
     p_start.add_argument("--graph-id", default="")
     p_start.add_argument("--no-gate", action="store_true", help="Disable calibration gate")

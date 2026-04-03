@@ -40,6 +40,26 @@ GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
 DEFAULT_SIGNAL_LOG = Path(__file__).resolve().parent.parent / "data" / "signal_log.jsonl"
 
+# Default keywords matching agent expertise domains (crypto/finance/geopolitics/tech).
+# Used to skip markets agents have no knowledge about (sports, weather, etc.).
+DEFAULT_RELEVANCE_KEYWORDS = [
+    # Crypto
+    "bitcoin", "btc", "ethereum", "eth", "crypto", "defi", "blockchain",
+    "nft", "stablecoin", "solana", "xrp", "token", "mining", "halving",
+    # Finance
+    "fed", "federal reserve", "interest rate", "inflation", "gdp", "recession",
+    "stock", "s&p", "nasdaq", "etf", "bond", "treasury", "bank",
+    # Geopolitics
+    "president", "election", "trump", "biden", "congress", "senate",
+    "war", "strike", "sanctions", "tariff", "nato", "china", "russia",
+    "iran", "israel", "ukraine", "military", "nuclear",
+    # Tech
+    "deepseek", "openai", "google", "apple", "tesla", "spacex",
+    "semiconductor", "chip",
+    # Markets
+    "polymarket", "prediction market", "price",
+]
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -53,11 +73,12 @@ class PipelineConfig:
     interval_seconds: int = 1800          # 30 minutes
     max_markets: int = 10                 # top N markets by volume
     market_category: str = ""             # filter by category (empty = all)
-    interview_timeout: int = 120          # seconds
+    interview_timeout: int = 300          # seconds (22 agents need ~5 min)
     signal_log_path: Path = DEFAULT_SIGNAL_LOG
     exit_config: Any = None               # ExitConfig for exit monitoring (None = disabled)
     calibration_gate: bool = False         # enable oracle-based calibration gate
     gate_max_brier: float = 0.25          # max Brier score to allow trading
+    relevance_keywords: list[str] = field(default_factory=list)  # empty = no filter
 
     def __post_init__(self):
         self.mirofish_url = self.mirofish_url or os.getenv("MIROFISH_BACKEND", "http://localhost:5001")
@@ -295,6 +316,22 @@ class PipelineTrigger:
                 graph_id=self.config.graph_id,
             )
 
+    def _is_market_relevant(self, market: ActiveMarket) -> bool:
+        """Check if a market question matches agent expertise domains.
+
+        Returns True if no keywords configured (permissive) or if any
+        keyword appears as a whole word in the question text.
+        """
+        keywords = self.config.relevance_keywords
+        if not keywords:
+            return True
+        q = market.question.lower()
+        for kw in keywords:
+            # Use word boundary regex to avoid "ai" matching inside "Taishan"
+            if re.search(r'\b' + re.escape(kw) + r'\b', q):
+                return True
+        return False
+
     def _get_edge_calculator(self):
         from trading.edge_calculator import EdgeCalculator, EdgeConfig
         config = self._edge_config or EdgeConfig()
@@ -350,6 +387,33 @@ class PipelineTrigger:
 
             if not markets:
                 logger.warning("No active markets found")
+                return signals_log
+
+            # Filter to markets matching agent expertise
+            if self.config.relevance_keywords:
+                before = len(markets)
+                relevant = [m for m in markets if self._is_market_relevant(m)]
+                skipped = before - len(relevant)
+                if skipped:
+                    logger.info(
+                        "Relevance filter: %d/%d markets skipped (not matching agent expertise)",
+                        skipped, before,
+                    )
+                    for m in markets:
+                        if not self._is_market_relevant(m):
+                            signals_log.append({
+                                "cycle_time": cycle_time,
+                                "market_id": m.id,
+                                "question": m.question,
+                                "market_price": m.current_price,
+                                "action": "SKIP",
+                                "reason": "market not relevant to agent expertise",
+                                "executed": False,
+                            })
+                markets = relevant
+
+            if not markets:
+                logger.warning("No relevant markets after filtering")
                 return signals_log
 
             calc = self._get_edge_calculator()
