@@ -90,6 +90,58 @@ class TestAggregateProbabilities:
         assert abs(result - 0.65) < 1e-10
 
 
+# ── Relevance filter ──────────────────────────────────────────────────────────
+
+
+class TestRelevanceFilter:
+    def _make_market(self, question):
+        return ActiveMarket(
+            id="0x1", question=question, token_ids=["t1"],
+            current_price=0.5, volume=100, category="",
+        )
+
+    def test_crypto_market_relevant(self):
+        config = PipelineConfig(relevance_keywords=["bitcoin", "ethereum"])
+        trigger = PipelineTrigger(config=config)
+        assert trigger._is_market_relevant(self._make_market("Will Bitcoin hit $100k?"))
+
+    def test_sports_market_not_relevant(self):
+        config = PipelineConfig(relevance_keywords=["bitcoin", "ethereum"])
+        trigger = PipelineTrigger(config=config)
+        assert not trigger._is_market_relevant(self._make_market("Will the Lakers win tonight?"))
+
+    def test_case_insensitive(self):
+        config = PipelineConfig(relevance_keywords=["bitcoin"])
+        trigger = PipelineTrigger(config=config)
+        assert trigger._is_market_relevant(self._make_market("BITCOIN price prediction"))
+
+    def test_empty_keywords_allows_all(self):
+        config = PipelineConfig(relevance_keywords=[])
+        trigger = PipelineTrigger(config=config)
+        assert trigger._is_market_relevant(self._make_market("Anything at all"))
+
+    def test_geopolitics_relevant(self):
+        config = PipelineConfig(relevance_keywords=["war", "iran", "israel"])
+        trigger = PipelineTrigger(config=config)
+        assert trigger._is_market_relevant(self._make_market("Will Israel strike Iran?"))
+
+    def test_word_in_sentence(self):
+        config = PipelineConfig(relevance_keywords=["bitcoin"])
+        trigger = PipelineTrigger(config=config)
+        assert trigger._is_market_relevant(self._make_market("Price of bitcoin on April 5"))
+
+    def test_no_substring_false_positive(self):
+        """'ai' should not match inside 'Taishan'."""
+        config = PipelineConfig(relevance_keywords=["ai"])
+        trigger = PipelineTrigger(config=config)
+        assert not trigger._is_market_relevant(self._make_market("Shandong Taishan FC (-1.5)"))
+
+    def test_multi_word_keyword(self):
+        config = PipelineConfig(relevance_keywords=["interest rate"])
+        trigger = PipelineTrigger(config=config)
+        assert trigger._is_market_relevant(self._make_market("Will interest rate stay at 4%?"))
+
+
 # ── Active market ─────────────────────────────────────────────────────────────
 
 
