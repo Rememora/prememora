@@ -377,9 +377,21 @@ class TestOrchestratorHandleEvent:
 
 class TestOrchestratorLifecycle:
     def test_requires_graph_id(self):
-        orch = IngestionOrchestrator()
+        orch = IngestionOrchestrator(
+            enable_polymarket=False,
+            enable_crypto_news=False,
+            enable_rss=False,
+            enable_whale=False,
+            enable_reddit=False,
+            enable_fred=False,
+            enable_fear_greed=False,
+            enable_predictit=False,
+            enable_metaculus=False,
+            enable_kalshi=False,
+            enable_onchain=False,
+        )
         with pytest.raises(ValueError, match="graph_id is required"):
-            asyncio.get_event_loop().run_until_complete(orch.start())
+            asyncio.run(orch.start())
 
     def test_build_connectors_all_disabled(self):
         orch = IngestionOrchestrator(
@@ -392,6 +404,9 @@ class TestOrchestratorLifecycle:
             enable_fred=False,
             enable_fear_greed=False,
             enable_predictit=False,
+            enable_metaculus=False,
+            enable_kalshi=False,
+            enable_onchain=False,
         )
         connectors = orch._build_connectors()
         assert connectors == []
@@ -409,6 +424,9 @@ class TestOrchestratorLifecycle:
             enable_fred=False,
             enable_fear_greed=False,
             enable_predictit=False,
+            enable_metaculus=False,
+            enable_kalshi=False,
+            enable_onchain=False,
         )
         connectors = orch._build_connectors()
         assert connectors == []

@@ -168,6 +168,47 @@ def _normalize_predictit(event: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _normalize_metaculus(event: dict[str, Any]) -> str:
+    title = event.get("question_title", "Unknown question")
+    qid = event.get("question_id", "?")
+    prob = event.get("community_probability")
+    forecasters = event.get("num_forecasters", 0)
+    url = event.get("url", "")
+
+    prob_str = f"{prob:.1%}" if prob is not None else "N/A"
+    text = f"Metaculus forecast [{qid}]: {title} — community P={prob_str}, forecasters={forecasters}"
+    if url:
+        text += f" ({url})"
+    return text
+
+
+def _normalize_kalshi(event: dict[str, Any]) -> str:
+    title = event.get("market_title", "Unknown market")
+    market_id = event.get("market_id", "?")
+    yes_price = event.get("yes_price")
+    volume = event.get("volume", 0)
+    category = event.get("category", "")
+
+    price_str = f"{yes_price:.2f}" if yes_price is not None else "N/A"
+    text = f"Kalshi market [{market_id}]: {title} — YES={price_str}, volume={volume}"
+    if category:
+        text += f", category={category}"
+    return text
+
+
+def _normalize_onchain(event: dict[str, Any]) -> str:
+    metric = event.get("metric", "unknown")
+    value = event.get("value")
+    previous = event.get("previous_value")
+    interpretation = event.get("interpretation", "unknown")
+
+    val_str = f"{value:.4f}" if value is not None else "N/A"
+    text = f"Bitcoin on-chain {metric}: {val_str} ({interpretation})"
+    if previous is not None:
+        text += f", previous={previous:.4f}"
+    return text
+
+
 _NORMALIZERS: dict[str, Any] = {
     "polymarket_ws": _normalize_polymarket,
     "crypto_news": _normalize_crypto_news,
@@ -177,6 +218,9 @@ _NORMALIZERS: dict[str, Any] = {
     "fred": _normalize_fred,
     "fear_greed": _normalize_fear_greed,
     "predictit": _normalize_predictit,
+    "metaculus": _normalize_metaculus,
+    "kalshi": _normalize_kalshi,
+    "onchain": _normalize_onchain,
 }
 
 
@@ -218,6 +262,12 @@ def _dedup_key(event: dict[str, Any]) -> str:
         raw = f"{event.get('value')}:{event.get('timestamp')}"
     elif source == "predictit":
         raw = f"{event.get('market_id')}:{event.get('timestamp')}"
+    elif source == "metaculus":
+        raw = f"{event.get('question_id')}:{event.get('community_probability')}"
+    elif source == "kalshi":
+        raw = f"{event.get('market_id')}:{event.get('yes_price')}"
+    elif source == "onchain":
+        raw = f"{event.get('metric')}:{event.get('value')}"
     else:
         raw = str(event)
 
@@ -276,6 +326,9 @@ class IngestionOrchestrator:
     enable_fred: bool = True
     enable_fear_greed: bool = True
     enable_predictit: bool = True
+    enable_metaculus: bool = True
+    enable_kalshi: bool = True
+    enable_onchain: bool = True
 
     # Internals
     _dedup: _LRUDedup = field(default_factory=_LRUDedup, init=False)
@@ -384,6 +437,24 @@ class IngestionOrchestrator:
 
             c = PredictItConnector(callback=self._handle_event)
             connectors.append(("predictit", c))
+
+        if self.enable_metaculus:
+            from ingestors.metaculus import MetaculusConnector
+
+            c = MetaculusConnector(callback=self._handle_event)
+            connectors.append(("metaculus", c))
+
+        if self.enable_kalshi:
+            from ingestors.kalshi import KalshiConnector
+
+            c = KalshiConnector(callback=self._handle_event)
+            connectors.append(("kalshi", c))
+
+        if self.enable_onchain:
+            from ingestors.onchain import OnChainConnector
+
+            c = OnChainConnector(callback=self._handle_event)
+            connectors.append(("onchain", c))
 
         return connectors
 
