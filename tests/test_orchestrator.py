@@ -145,6 +145,60 @@ class TestNormalizeEvent:
         assert "-2.3" in text
         assert "+" not in text
 
+    def test_fear_greed(self):
+        event = {
+            "source": "fear_greed",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "value": 73,
+            "classification": "Greed",
+            "previous_value": 65,
+            "trend": "rising",
+        }
+        text = normalize_event(event)
+        assert "Fear & Greed" in text
+        assert "73" in text
+        assert "Greed" in text
+        assert "rising" in text
+        assert "65" in text
+
+    def test_fear_greed_no_previous(self):
+        event = {
+            "source": "fear_greed",
+            "value": 50,
+            "classification": "Neutral",
+            "trend": "stable",
+        }
+        text = normalize_event(event)
+        assert "50" in text
+        assert "previous" not in text
+
+    def test_predictit(self):
+        event = {
+            "source": "predictit",
+            "timestamp": "2026-04-01T10:00:00Z",
+            "market_id": "7456",
+            "market_name": "Who will win the 2026 Senate race?",
+            "contracts": [
+                {"name": "Alice", "price": 0.62},
+                {"name": "Bob", "price": 0.35},
+            ],
+        }
+        text = normalize_event(event)
+        assert "PredictIt" in text
+        assert "7456" in text
+        assert "Alice" in text
+        assert "0.62" in text
+
+    def test_predictit_empty_contracts(self):
+        event = {
+            "source": "predictit",
+            "market_id": "999",
+            "market_name": "Test Market",
+            "contracts": [],
+        }
+        text = normalize_event(event)
+        assert "Test Market" in text
+
     def test_unknown_source(self):
         event = {"source": "mystery", "data": "hello"}
         text = normalize_event(event)
@@ -198,6 +252,20 @@ class TestDedupKey:
     def test_fred_uses_series_and_timestamp(self):
         e1 = {"source": "fred", "series_id": "GDP", "timestamp": "2026-03-01"}
         e2 = {"source": "fred", "series_id": "GDP", "timestamp": "2026-03-02"}
+        assert _dedup_key(e1) != _dedup_key(e2)
+
+    def test_fear_greed_uses_value_and_timestamp(self):
+        e1 = {"source": "fear_greed", "value": 73, "timestamp": "2026-04-01T10:00:00Z"}
+        e2 = {"source": "fear_greed", "value": 73, "timestamp": "2026-04-01T11:00:00Z"}
+        assert _dedup_key(e1) != _dedup_key(e2)
+
+    def test_fear_greed_same_dedup(self):
+        e1 = {"source": "fear_greed", "value": 73, "timestamp": "2026-04-01T10:00:00Z"}
+        assert _dedup_key(e1) == _dedup_key(e1)
+
+    def test_predictit_uses_market_and_timestamp(self):
+        e1 = {"source": "predictit", "market_id": "100", "timestamp": "2026-04-01T10:00:00Z"}
+        e2 = {"source": "predictit", "market_id": "200", "timestamp": "2026-04-01T10:00:00Z"}
         assert _dedup_key(e1) != _dedup_key(e2)
 
 
@@ -322,6 +390,8 @@ class TestOrchestratorLifecycle:
             enable_whale=False,
             enable_reddit=False,
             enable_fred=False,
+            enable_fear_greed=False,
+            enable_predictit=False,
         )
         connectors = orch._build_connectors()
         assert connectors == []
@@ -337,6 +407,8 @@ class TestOrchestratorLifecycle:
             enable_whale=False,
             enable_reddit=False,
             enable_fred=False,
+            enable_fear_greed=False,
+            enable_predictit=False,
         )
         connectors = orch._build_connectors()
         assert connectors == []
