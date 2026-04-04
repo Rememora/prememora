@@ -141,6 +141,33 @@ def _normalize_fred(event: dict[str, Any]) -> str:
     return text
 
 
+def _normalize_fear_greed(event: dict[str, Any]) -> str:
+    value = event.get("value", "?")
+    classification = event.get("classification", "Unknown")
+    previous = event.get("previous_value")
+    trend = event.get("trend", "stable")
+
+    text = f"Crypto Fear & Greed Index: {value} ({classification}), trend: {trend}"
+    if previous is not None:
+        text += f", previous: {previous}"
+    return text
+
+
+def _normalize_predictit(event: dict[str, Any]) -> str:
+    market_name = event.get("market_name", "Unknown market")
+    market_id = event.get("market_id", "?")
+    contracts = event.get("contracts", [])
+
+    parts = [f"PredictIt market [{market_id}]: {market_name}"]
+    for c in contracts[:5]:
+        name = c.get("name", "?")
+        price = c.get("price", "?")
+        parts.append(f"  {name}: ${price}")
+    if len(contracts) > 5:
+        parts.append(f"  ... and {len(contracts) - 5} more contracts")
+    return "\n".join(parts)
+
+
 _NORMALIZERS: dict[str, Any] = {
     "polymarket_ws": _normalize_polymarket,
     "crypto_news": _normalize_crypto_news,
@@ -148,6 +175,8 @@ _NORMALIZERS: dict[str, Any] = {
     "whale_alert": _normalize_whale,
     "reddit": _normalize_reddit,
     "fred": _normalize_fred,
+    "fear_greed": _normalize_fear_greed,
+    "predictit": _normalize_predictit,
 }
 
 
@@ -185,6 +214,10 @@ def _dedup_key(event: dict[str, Any]) -> str:
         raw = event.get("post_id") or event.get("url", "")
     elif source == "fred":
         raw = f"{event.get('series_id')}:{event.get('timestamp')}"
+    elif source == "fear_greed":
+        raw = f"{event.get('value')}:{event.get('timestamp')}"
+    elif source == "predictit":
+        raw = f"{event.get('market_id')}:{event.get('timestamp')}"
     else:
         raw = str(event)
 
@@ -241,6 +274,8 @@ class IngestionOrchestrator:
     enable_whale: bool = True
     enable_reddit: bool = True
     enable_fred: bool = True
+    enable_fear_greed: bool = True
+    enable_predictit: bool = True
 
     # Internals
     _dedup: _LRUDedup = field(default_factory=_LRUDedup, init=False)
@@ -338,6 +373,18 @@ class IngestionOrchestrator:
             c = FredMacroConnector(callback=self._handle_event_batch)
             connectors.append(("fred", c))
 
+        if self.enable_fear_greed:
+            from ingestors.fear_greed import FearGreedConnector
+
+            c = FearGreedConnector(callback=self._handle_event)
+            connectors.append(("fear_greed", c))
+
+        if self.enable_predictit:
+            from ingestors.predictit import PredictItConnector
+
+            c = PredictItConnector(callback=self._handle_event)
+            connectors.append(("predictit", c))
+
         return connectors
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -376,6 +423,8 @@ class IngestionOrchestrator:
         #   - WhaleTracker.start()           (async, blocks)
         #   - RedditSentimentConnector.start() (async, blocks)
         #   - FredMacroConnector.start()     (async, creates background task)
+        #   - FearGreedConnector.start()     (async, blocks)
+        #   - PredictItConnector.start()     (async, blocks)
         for name, connector in named_connectors:
             if hasattr(connector, "run") and name == "rss":
                 coro = connector.run()
