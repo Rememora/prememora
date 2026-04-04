@@ -1,14 +1,15 @@
 """
-Bitcoin On-Chain Metrics connector — polls the BGeometrics API for
-key on-chain indicators (MVRV Z-Score, SOPR, NUPL) and emits events
-with current values, previous values, and market-phase interpretations.
+Bitcoin on-chain and market data connector — polls Blockchain.com and
+CoinGecko for key metrics and emits events with values and interpretations.
 
-Endpoints:
-  - https://charts.bgeometrics.com/apiservice?chart=mvrv_zscore&format=json
-  - https://charts.bgeometrics.com/apiservice?chart=sopr&format=json
-  - https://charts.bgeometrics.com/apiservice?chart=nupl&format=json
+Sources:
+  - Blockchain.com: hashrate, difficulty, market price, fees, tx count
+    https://api.blockchain.info/stats
+    https://api.blockchain.info/charts/{metric}?timespan=7days&format=json
+  - CoinGecko: BTC dominance, total market cap, trending coins
+    https://api.coingecko.com/api/v3/global
 
-Free, no API key required.
+Free, no API keys required.
 """
 
 from __future__ import annotations
@@ -17,123 +18,46 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
 
 logger = logging.getLogger("prememora.ingestors.onchain")
 
-BASE_URL = "https://charts.bgeometrics.com/apiservice"
+BLOCKCHAIN_STATS_URL = "https://api.blockchain.info/stats"
+BLOCKCHAIN_CHARTS_URL = "https://api.blockchain.info/charts"
+COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
 
 EventCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 
-# Metrics to fetch, with their chart parameter names.
-METRICS = ["mvrv_zscore", "sopr", "nupl"]
 
-
-def _interpret_mvrv(value: float) -> str:
-    """Interpret MVRV Z-Score.
-
-    <0 = undervalued (historically good buy zone)
-    0-3 = fair value range
-    >3 = overvalued / potential market top signal
-    """
-    if value < 0:
-        return "undervalued"
-    elif value <= 3:
-        return "fair"
+def _interpret_dominance(value: float) -> str:
+    """Interpret BTC dominance percentage."""
+    if value > 60:
+        return "btc_dominant"
+    elif value > 50:
+        return "btc_leading"
+    elif value > 40:
+        return "balanced"
     else:
-        return "overvalued"
+        return "altcoin_season"
 
 
-def _interpret_sopr(value: float) -> str:
-    """Interpret Spent Output Profit Ratio.
-
-    <1 = selling at loss (capitulation / accumulation)
-    =1 = breakeven
-    >1 = selling at profit (distribution)
-    """
-    if value < 1:
-        return "selling_at_loss"
-    elif value == 1.0:
-        return "breakeven"
+def _interpret_hashrate_change(pct: float) -> str:
+    """Interpret hashrate 7-day change."""
+    if pct > 5:
+        return "growing_fast"
+    elif pct > 0:
+        return "growing"
+    elif pct > -5:
+        return "declining"
     else:
-        return "selling_at_profit"
-
-
-def _interpret_nupl(value: float) -> str:
-    """Interpret Net Unrealized Profit/Loss.
-
-    <0 = capitulation (holders underwater)
-    0-0.25 = hope / fear
-    0.25-0.5 = optimism / anxiety
-    0.5-0.75 = belief / denial
-    >0.75 = euphoria / greed
-    """
-    if value < 0:
-        return "capitulation"
-    elif value < 0.25:
-        return "hope_fear"
-    elif value < 0.5:
-        return "optimism"
-    elif value < 0.75:
-        return "belief"
-    else:
-        return "euphoria"
-
-
-_INTERPRETERS = {
-    "mvrv_zscore": _interpret_mvrv,
-    "sopr": _interpret_sopr,
-    "nupl": _interpret_nupl,
-}
-
-
-def _parse_metric_data(data: Any) -> Optional[Tuple[float, float]]:
-    """Parse BGeometrics JSON response into (latest_value, previous_value).
-
-    The API returns a list of [date, value] pairs sorted by date ascending.
-    We take the last two entries for current and previous values.
-
-    Returns None if the data is not parseable.
-    """
-    if not isinstance(data, list) or len(data) < 1:
-        return None
-
-    try:
-        # Try list-of-lists format: [[date, value], ...]
-        if isinstance(data[0], (list, tuple)) and len(data[0]) >= 2:
-            latest = float(data[-1][1])
-            previous = float(data[-2][1]) if len(data) >= 2 else latest
-            return latest, previous
-
-        # Try list-of-dicts format: [{"date": ..., "value": ...}, ...]
-        if isinstance(data[0], dict):
-            val_key = None
-            for key in ("value", "v", "y"):
-                if key in data[0]:
-                    val_key = key
-                    break
-            if val_key:
-                latest = float(data[-1][val_key])
-                previous = float(data[-2][val_key]) if len(data) >= 2 else latest
-                return latest, previous
-
-        # Try plain list of numbers
-        if isinstance(data[0], (int, float)):
-            latest = float(data[-1])
-            previous = float(data[-2]) if len(data) >= 2 else latest
-            return latest, previous
-
-    except (TypeError, ValueError, IndexError, KeyError):
-        pass
-
-    return None
+        return "declining_fast"
 
 
 @dataclass
 class OnChainConnector:
-    """Polls BGeometrics for Bitcoin on-chain metrics, emitting events per metric.
+    """Polls Blockchain.com and CoinGecko for on-chain/market metrics.
 
     Parameters
     ----------
@@ -152,7 +76,7 @@ class OnChainConnector:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=60),
+                timeout=aiohttp.ClientTimeout(total=30),
                 headers={"Accept": "application/json"},
             )
         return self._session
@@ -161,58 +85,134 @@ class OnChainConnector:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _fetch_metric(self, chart: str) -> Any:
-        """Fetch a single metric from BGeometrics."""
+    async def _fetch_blockchain_stats(self) -> Optional[Dict[str, Any]]:
+        """Fetch Bitcoin network stats from Blockchain.com."""
         session = await self._get_session()
-        params = {"chart": chart, "format": "json"}
         try:
-            async with session.get(BASE_URL, params=params) as resp:
+            async with session.get(BLOCKCHAIN_STATS_URL) as resp:
                 if resp.status != 200:
-                    logger.warning("BGeometrics API returned %d for %s", resp.status, chart)
+                    logger.warning("Blockchain.com stats API returned %d", resp.status)
                     return None
                 return await resp.json(content_type=None)
         except Exception as e:
-            logger.error("Failed to fetch on-chain metric %s: %s", chart, e)
+            logger.error("Failed to fetch blockchain stats: %s", e)
+            return None
+
+    async def _fetch_blockchain_chart(self, metric: str, timespan: str = "7days") -> Optional[List]:
+        """Fetch a chart metric from Blockchain.com."""
+        session = await self._get_session()
+        url = f"{BLOCKCHAIN_CHARTS_URL}/{metric}"
+        try:
+            async with session.get(url, params={"timespan": timespan, "format": "json"}) as resp:
+                if resp.status != 200:
+                    logger.warning("Blockchain.com chart API returned %d for %s", resp.status, metric)
+                    return None
+                data = await resp.json(content_type=None)
+                return data.get("values", [])
+        except Exception as e:
+            logger.error("Failed to fetch blockchain chart %s: %s", metric, e)
+            return None
+
+    async def _fetch_coingecko_global(self) -> Optional[Dict[str, Any]]:
+        """Fetch global crypto market data from CoinGecko."""
+        session = await self._get_session()
+        try:
+            async with session.get(COINGECKO_GLOBAL_URL) as resp:
+                if resp.status != 200:
+                    logger.warning("CoinGecko global API returned %d", resp.status)
+                    return None
+                data = await resp.json(content_type=None)
+                return data.get("data", {})
+        except Exception as e:
+            logger.error("Failed to fetch CoinGecko global: %s", e)
             return None
 
     async def poll_once(self) -> List[Dict[str, Any]]:
-        """Fetch all metrics and return events for each.
-
-        Each metric produces one event with the latest value, previous
-        value, and a human-readable interpretation.
-        """
+        """Fetch all metrics and return events."""
         events: List[Dict[str, Any]] = []
+        now = datetime.now(timezone.utc).isoformat()
 
-        for metric in METRICS:
-            raw_data = await self._fetch_metric(metric)
-            if raw_data is None:
-                continue
-
-            parsed = _parse_metric_data(raw_data)
-            if parsed is None:
-                logger.warning("Could not parse data for %s", metric)
-                continue
-
-            value, previous_value = parsed
-            interpreter = _INTERPRETERS.get(metric)
-            interpretation = interpreter(value) if interpreter else "unknown"
-
-            event: Dict[str, Any] = {
+        # 1. Blockchain.com stats
+        stats = await self._fetch_blockchain_stats()
+        if stats:
+            price = stats.get("market_price_usd", 0)
+            prev_price = self._last_values.get("btc_price", price)
+            events.append({
                 "source": "onchain",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "metric": metric,
-                "value": value,
-                "previous_value": previous_value,
-                "interpretation": interpretation,
-            }
+                "timestamp": now,
+                "metric": "btc_price",
+                "value": price,
+                "previous_value": prev_price,
+                "interpretation": f"${price:,.0f}",
+            })
+            self._last_values["btc_price"] = price
 
-            self._last_values[metric] = value
-            events.append(event)
+            hashrate = stats.get("hash_rate", 0)
+            prev_hashrate = self._last_values.get("hashrate", hashrate)
+            pct_change = ((hashrate - prev_hashrate) / prev_hashrate * 100) if prev_hashrate else 0
+            events.append({
+                "source": "onchain",
+                "timestamp": now,
+                "metric": "hashrate",
+                "value": hashrate,
+                "previous_value": prev_hashrate,
+                "interpretation": _interpret_hashrate_change(pct_change),
+            })
+            self._last_values["hashrate"] = hashrate
+
+            n_tx = stats.get("n_tx", 0)
+            events.append({
+                "source": "onchain",
+                "timestamp": now,
+                "metric": "daily_transactions",
+                "value": n_tx,
+                "previous_value": self._last_values.get("daily_transactions", n_tx),
+                "interpretation": f"{n_tx:,} txs",
+            })
+            self._last_values["daily_transactions"] = n_tx
+
+        # 2. CoinGecko global
+        global_data = await self._fetch_coingecko_global()
+        if global_data:
+            mcap_pct = global_data.get("market_cap_percentage", {})
+            btc_dom = mcap_pct.get("btc", 0)
+            prev_dom = self._last_values.get("btc_dominance", btc_dom)
+            events.append({
+                "source": "onchain",
+                "timestamp": now,
+                "metric": "btc_dominance",
+                "value": round(btc_dom, 2),
+                "previous_value": round(prev_dom, 2),
+                "interpretation": _interpret_dominance(btc_dom),
+            })
+            self._last_values["btc_dominance"] = btc_dom
+
+            total_mcap = global_data.get("total_market_cap", {}).get("usd", 0)
+            events.append({
+                "source": "onchain",
+                "timestamp": now,
+                "metric": "total_market_cap",
+                "value": total_mcap,
+                "previous_value": self._last_values.get("total_market_cap", total_mcap),
+                "interpretation": f"${total_mcap/1e12:.2f}T",
+            })
+            self._last_values["total_market_cap"] = total_mcap
+
+            mcap_change = global_data.get("market_cap_change_percentage_24h_usd", 0)
+            events.append({
+                "source": "onchain",
+                "timestamp": now,
+                "metric": "market_cap_change_24h",
+                "value": round(mcap_change, 2),
+                "previous_value": self._last_values.get("market_cap_change_24h", 0),
+                "interpretation": "bullish" if mcap_change > 0 else "bearish",
+            })
+            self._last_values["market_cap_change_24h"] = mcap_change
 
         return events
 
     async def start(self) -> None:
-        """Start the polling loop. Runs until stop() is called."""
+        """Start the polling loop."""
         self._running = True
         logger.info("On-chain connector starting, interval=%ss", self.poll_interval)
 
@@ -230,36 +230,4 @@ class OnChainConnector:
             await asyncio.sleep(self.poll_interval)
 
     def stop(self) -> None:
-        """Signal the polling loop to stop after the current cycle."""
         self._running = False
-
-
-# ── Standalone demo ──────────────────────────────────────────────────────────
-
-
-async def _main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-    )
-
-    async def print_event(event: Dict[str, Any]) -> None:
-        print(
-            f"  {event['metric']}: {event['value']:.4f} "
-            f"(prev={event['previous_value']:.4f}) "
-            f"— {event['interpretation']}"
-        )
-
-    connector = OnChainConnector(callback=print_event, poll_interval=60)
-    print("Polling Bitcoin on-chain metrics — Ctrl-C to stop\n")
-
-    try:
-        await connector.start()
-    except KeyboardInterrupt:
-        connector.stop()
-    finally:
-        await connector.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(_main())

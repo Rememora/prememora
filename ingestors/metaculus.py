@@ -3,7 +3,11 @@ Metaculus Expert Forecasts connector — polls the Metaculus API for
 open forecast questions and emits events when community probabilities change.
 
 Endpoint: https://www.metaculus.com/api2/questions/?status=open&type=forecast&limit=50&order_by=-activity
-Free, no API key required for read access.
+
+NOTE: As of April 2026, the Metaculus API returns 403 for unauthenticated
+requests. This connector is built and tested but disabled by default in the
+orchestrator until auth is resolved. Enable with enable_metaculus=True once
+a valid auth token is available (set METACULUS_TOKEN env var).
 """
 
 from __future__ import annotations

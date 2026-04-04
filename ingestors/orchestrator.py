@@ -326,7 +326,7 @@ class IngestionOrchestrator:
     enable_fred: bool = True
     enable_fear_greed: bool = True
     enable_predictit: bool = True
-    enable_metaculus: bool = True
+    enable_metaculus: bool = False  # API returns 403 without auth (Apr 2026)
     enable_kalshi: bool = True
     enable_onchain: bool = True
 
