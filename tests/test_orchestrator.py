@@ -389,6 +389,8 @@ class TestOrchestratorLifecycle:
             enable_metaculus=False,
             enable_kalshi=False,
             enable_onchain=False,
+            enable_gdelt=False,
+            enable_coingecko=False,
         )
         with pytest.raises(ValueError, match="graph_id is required"):
             asyncio.run(orch.start())
@@ -407,6 +409,8 @@ class TestOrchestratorLifecycle:
             enable_metaculus=False,
             enable_kalshi=False,
             enable_onchain=False,
+            enable_gdelt=False,
+            enable_coingecko=False,
         )
         connectors = orch._build_connectors()
         assert connectors == []
@@ -427,6 +431,8 @@ class TestOrchestratorLifecycle:
             enable_metaculus=False,
             enable_kalshi=False,
             enable_onchain=False,
+            enable_gdelt=False,
+            enable_coingecko=False,
         )
         connectors = orch._build_connectors()
         assert connectors == []

@@ -209,6 +209,51 @@ def _normalize_onchain(event: dict[str, Any]) -> str:
     return text
 
 
+def _normalize_gdelt(event: dict[str, Any]) -> str:
+    title = event.get("title", "")
+    domain = event.get("domain", "")
+    tone = event.get("tone", 0.0)
+    query = event.get("search_query", "")
+
+    tone_label = "positive" if tone > 1 else ("negative" if tone < -1 else "neutral")
+    parts = []
+    if domain:
+        parts.append(f"[{domain}]")
+    if title:
+        parts.append(title)
+    parts.append(f"Tone: {tone:.1f} ({tone_label})")
+    if query:
+        parts.append(f"Query: {query}")
+    return " | ".join(parts) if parts else "GDELT article (no content)"
+
+
+def _normalize_coingecko(event: dict[str, Any]) -> str:
+    event_type = event.get("event_type", "unknown")
+
+    if event_type == "trending":
+        coins = event.get("coins", [])
+        if not coins:
+            return "CoinGecko trending: no coins"
+        names = ", ".join(
+            f"{c.get('name', '?')} ({c.get('symbol', '?')})" for c in coins[:10]
+        )
+        return f"CoinGecko trending coins: {names}"
+
+    if event_type == "prices":
+        prices = event.get("prices", {})
+        if not prices:
+            return "CoinGecko prices: no data"
+        parts = []
+        for coin_id, p in prices.items():
+            usd = p.get("usd", "?")
+            change = p.get("usd_24h_change")
+            change_str = f"{change:+.1f}%" if change is not None else "N/A"
+            parts.append(f"{coin_id}=${usd} ({change_str})")
+        return f"CoinGecko prices: {', '.join(parts)}"
+
+    return f"CoinGecko {event_type} event"
+
+
 _NORMALIZERS: dict[str, Any] = {
     "polymarket_ws": _normalize_polymarket,
     "crypto_news": _normalize_crypto_news,
@@ -221,6 +266,8 @@ _NORMALIZERS: dict[str, Any] = {
     "metaculus": _normalize_metaculus,
     "kalshi": _normalize_kalshi,
     "onchain": _normalize_onchain,
+    "gdelt": _normalize_gdelt,
+    "coingecko": _normalize_coingecko,
 }
 
 
@@ -268,6 +315,10 @@ def _dedup_key(event: dict[str, Any]) -> str:
         raw = f"{event.get('market_id')}:{event.get('yes_price')}"
     elif source == "onchain":
         raw = f"{event.get('metric')}:{event.get('value')}"
+    elif source == "gdelt":
+        raw = event.get("url") or event.get("title", "")
+    elif source == "coingecko":
+        raw = f"{event.get('event_type')}:{event.get('timestamp')}"
     else:
         raw = str(event)
 
@@ -329,6 +380,8 @@ class IngestionOrchestrator:
     enable_metaculus: bool = False  # API returns 403 without auth (Apr 2026)
     enable_kalshi: bool = True
     enable_onchain: bool = True
+    enable_gdelt: bool = True
+    enable_coingecko: bool = True
 
     # Internals
     _dedup: _LRUDedup = field(default_factory=_LRUDedup, init=False)
@@ -455,6 +508,18 @@ class IngestionOrchestrator:
 
             c = OnChainConnector(callback=self._handle_event)
             connectors.append(("onchain", c))
+
+        if self.enable_gdelt:
+            from ingestors.gdelt import GDELTConnector
+
+            c = GDELTConnector(callback=self._handle_event)
+            connectors.append(("gdelt", c))
+
+        if self.enable_coingecko:
+            from ingestors.coingecko import CoinGeckoConnector
+
+            c = CoinGeckoConnector(callback=self._handle_event)
+            connectors.append(("coingecko", c))
 
         return connectors
 
