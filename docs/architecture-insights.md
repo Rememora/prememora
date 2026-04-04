@@ -72,3 +72,49 @@ Design decisions and lessons learned while building the PreMemora prediction pip
 ## No Fee on Market Resolution
 
 Winners get exactly $1/share, losers get $0. The entry fee is the only drag on a winning position. This is why the paper trading engine records `fee=0` for RESOLVE trade records.
+
+## Calibration Gate as Circuit Breaker
+
+**Decision**: Block all trade execution when prediction Brier score exceeds 0.25 (random guessing baseline).
+
+**Why**: The hindsight oracle revealed that while LLM probability estimates can have good calibration (Brier 0.10), the trading outcomes can still be negative (-$1,857 in backtest). Running the oracle before trading acts like a circuit breaker — if the system's predictions degrade (model drift, API changes, bad context), trading stops automatically rather than bleeding money.
+
+**How it works**: Before each pipeline cycle, the gate runs the oracle on recently resolved markets. Results are cached in SQLite (default: 24h TTL). If Brier > threshold, all signals are logged but `executed=False` with `gate_blocked=True` in the signal log.
+
+## Agent Expertise Matching
+
+**Decision**: Filter markets by keyword relevance before interviewing agents.
+
+**Why**: MiroFish agents have specific personas (BlackRock, Federal Reserve, MicroStrategy, etc.) with crypto/finance/geopolitics expertise. When asked about golf tournaments or basketball games, every agent returns 50% — no edge, wasted interview time (~5 minutes for 22 agents). Word-boundary keyword matching (`\bbitcoin\b`, `\bwar\b`) skips irrelevant markets before the expensive LLM interview step.
+
+**Result**: On real Polymarket data, agents gave strong signals on geopolitics (2% for "Will Israel strike 14 countries" vs market 50%) and nuanced estimates on tech (32% for "DeepSeek V4 by April 7" vs market 50%), while correctly abstaining on sports.
+
+## Swarm Over Single LLM
+
+**Decision**: MiroFish agent interviews are required — no LLM fallback.
+
+**Why**: We briefly added a single-LLM fallback for when MiroFish isn't running. It was removed because: (a) 22 agents with diverse personas produce a range of estimates (e.g., 20-85% on the Hormuz question) that captures genuine uncertainty — a single LLM gives one point estimate; (b) trimmed mean aggregation filters outliers that would mislead a single model; (c) the whole value proposition of PreMemora is swarm intelligence, not yet-another-LLM-wrapper.
+
+## Brier Score vs P&L Divergence
+
+**Discovery**: Good Brier score (0.10) does not guarantee profitable trading (-$1,857).
+
+**Why**: Brier measures probability calibration ("are your 70% predictions right 70% of the time?"). P&L depends on edge size, position sizing, and market selection. You can have perfect calibration and still lose money if you bet on tiny edges that happen to go wrong, or if the eval prices don't reflect real market conditions.
+
+**Implication**: The calibration gate uses Brier (prevents garbage predictions), but profitability requires additional tuning of min_edge threshold, Kelly fraction, and market selection. These should be tuned using the soak test data, not just Brier.
+
+## CLOB Price History Gap
+
+**Discovery**: Polymarket's CLOB API doesn't serve price history for resolved markets.
+
+**Why**: Once a market resolves, the CLOB order book is closed and historical data becomes unavailable. This means the hindsight oracle can't get real pre-resolution prices for backtesting — it has to use synthetic eval prices, making backtest P&L unreliable.
+
+**Fix**: The data collector (`e2e/data_collector.py`) polls Polymarket every 15 minutes and stores price snapshots in SQLite while markets are active. When markets resolve, we have their actual price history from our own observations. This gives the oracle real eval prices for future backtests.
+
+## Data-First, Trade-Later
+
+**Decision**: Run in data-collection mode before enabling trading.
+
+**Why**: The system needs historical data to validate itself. Without price history, the oracle uses synthetic prices. Without accumulated graph events, agents lack context. Without resolved predictions, we can't compute meaningful Brier scores. The right sequence is: (1) collect market prices + news events for weeks, (2) run the oracle with real historical data, (3) validate prediction accuracy, (4) enable paper trading only when calibration proves out, (5) live trading only after paper trading is profitable.
+
+**What's running continuously**: Ingestion orchestrator (RSS + crypto news → graph) + data collector (market prices + resolutions → SQLite). Everything else is on-demand.
