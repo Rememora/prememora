@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
 import sqlite3
 from datetime import datetime, timezone
@@ -64,8 +65,19 @@ def _get_db() -> sqlite3.Connection:
             snapshot_count  INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS market_graph_links (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id   TEXT NOT NULL,
+            fact        TEXT NOT NULL,
+            search_term TEXT,
+            linked_at   TEXT NOT NULL,
+            FOREIGN KEY (market_id) REFERENCES resolutions(market_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_snapshots_market
             ON market_snapshots(market_id, snapshot_at);
+        CREATE INDEX IF NOT EXISTS idx_graph_links_market
+            ON market_graph_links(market_id);
     """)
     conn.commit()
     return conn
@@ -251,10 +263,94 @@ async def check_resolutions(
     return count
 
 
+# ── Graph linking ─────────────────────────────────────────────────────────────
+
+
+def link_resolutions_to_graph(
+    conn: sqlite3.Connection,
+    graph_id: str,
+    neo4j_uri: str = "bolt://localhost:7687",
+    neo4j_user: str = "neo4j",
+    neo4j_password: str = "prememora_local",
+) -> int:
+    """Search graph for facts relevant to resolved markets and store links.
+
+    For each resolved market that hasn't been linked yet, extracts search
+    terms from the question, queries the graph, and records matching facts.
+    This creates ground truth: "these events were available when this market
+    was active and it resolved YES/NO."
+    """
+    # Find resolutions without graph links
+    rows = conn.execute("""
+        SELECT r.market_id, r.question, r.outcome
+        FROM resolutions r
+        LEFT JOIN market_graph_links g ON r.market_id = g.market_id
+        WHERE g.market_id IS NULL
+    """).fetchall()
+
+    if not rows:
+        return 0
+
+    from pipeline.context import ContextBuilder
+
+    builder = ContextBuilder(
+        graph_id=graph_id,
+        neo4j_uri=neo4j_uri,
+        neo4j_user=neo4j_user,
+        neo4j_password=neo4j_password,
+        max_facts=30,
+        max_facts_per_term=10,
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+    total_links = 0
+
+    for row in rows:
+        market_id = row["market_id"]
+        question = row["question"]
+
+        try:
+            context = builder.build_context(question)
+        except Exception as e:
+            logger.warning("Graph search failed for %s: %s", market_id[:16], e)
+            # Insert a placeholder so we don't retry every cycle
+            conn.execute(
+                "INSERT INTO market_graph_links (market_id, fact, search_term, linked_at) VALUES (?, ?, ?, ?)",
+                (market_id, "(no graph data)", "", now),
+            )
+            continue
+
+        if not context.facts:
+            conn.execute(
+                "INSERT INTO market_graph_links (market_id, fact, search_term, linked_at) VALUES (?, ?, ?, ?)",
+                (market_id, "(no matching facts)", ",".join(context.search_terms), now),
+            )
+            continue
+
+        for fact in context.facts:
+            conn.execute(
+                "INSERT INTO market_graph_links (market_id, fact, search_term, linked_at) VALUES (?, ?, ?, ?)",
+                (market_id, fact, ",".join(context.search_terms), now),
+            )
+            total_links += 1
+
+        logger.info(
+            "Linked %s → %d graph facts (%s)",
+            question[:40], len(context.facts), row["outcome"],
+        )
+
+    conn.commit()
+    return total_links
+
+
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 
-async def run_collector(interval: int = 3600, max_markets: int = 50) -> None:
+async def run_collector(
+    interval: int = 3600,
+    max_markets: int = 50,
+    graph_id: str = "",
+) -> None:
     """Run the data collector loop."""
     conn = _get_db()
     cycle = 0
@@ -277,8 +373,18 @@ async def run_collector(interval: int = 3600, max_markets: int = 50) -> None:
             snaps = await snapshot_markets(session, conn, max_markets)
             resolved = await check_resolutions(session, conn)
 
-        if resolved:
-            logger.info("Cycle %d: %d snapshots, %d new resolutions", cycle, snaps, resolved)
+        # Link resolved markets to graph facts
+        linked = 0
+        if graph_id:
+            try:
+                linked = await asyncio.to_thread(
+                    link_resolutions_to_graph, conn, graph_id,
+                )
+            except Exception:
+                logger.exception("Graph linking failed")
+
+        if resolved or linked:
+            logger.info("Cycle %d: %d snapshots, %d resolutions, %d graph links", cycle, snaps, resolved, linked)
 
         if not stop:
             try:
@@ -301,6 +407,8 @@ def show_stats() -> None:
     snapshots = conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
     unique = conn.execute("SELECT COUNT(DISTINCT market_id) FROM market_snapshots").fetchone()[0]
     resolutions = conn.execute("SELECT COUNT(*) FROM resolutions").fetchone()[0]
+    graph_links = conn.execute("SELECT COUNT(*) FROM market_graph_links WHERE fact NOT LIKE '(%'").fetchone()[0]
+    linked_markets = conn.execute("SELECT COUNT(DISTINCT market_id) FROM market_graph_links WHERE fact NOT LIKE '(%'").fetchone()[0]
 
     ts_row = conn.execute(
         "SELECT MIN(snapshot_at), MAX(snapshot_at) FROM market_snapshots"
@@ -315,6 +423,7 @@ def show_stats() -> None:
     print(f"Snapshots:       {snapshots:,}")
     print(f"Unique markets:  {unique:,}")
     print(f"Resolutions:     {resolutions:,}")
+    print(f"Graph links:     {graph_links:,} facts across {linked_markets} markets")
     if ts_row[0]:
         print(f"Date range:      {ts_row[0][:19]} → {ts_row[1][:19]}")
     if recent_res:
@@ -340,13 +449,15 @@ async def main():
     p_start = sub.add_parser("start", help="Start collecting data")
     p_start.add_argument("--interval", type=int, default=3600, help="Seconds between cycles (default: 1h)")
     p_start.add_argument("--max-markets", type=int, default=50)
+    p_start.add_argument("--graph-id", default="", help="Graphiti graph ID for resolution linking")
 
     sub.add_parser("stats", help="Show collection statistics")
 
     args = parser.parse_args()
 
     if args.command == "start":
-        await run_collector(interval=args.interval, max_markets=args.max_markets)
+        gid = args.graph_id or os.getenv("PREMEMORA_GRAPH_ID", "")
+        await run_collector(interval=args.interval, max_markets=args.max_markets, graph_id=gid)
     elif args.command == "stats":
         show_stats()
     else:
